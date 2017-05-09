@@ -1,4 +1,7 @@
+library(FeatureHashing)
 library(tidyverse)
+library(xgboost)
+
 setwd("~/Documents/Kaggle/russian-housing-kaggle/")
 
 
@@ -34,9 +37,9 @@ setdiff(colnames(raw_train), colnames(raw_test))
 
 
 small_train <- raw_train %>% select(price_doc, id, timestamp, full_sq, life_sq, floor,
-                     max_floor, material, build_year, num_room, kitch_sq,
-                     state, product_type, sub_area) 
-  
+                                    max_floor, material, build_year, num_room, kitch_sq,
+                                    state, product_type, sub_area) 
+
 
 # seem to be lots of values that are NA, consider why this might be the case?
 # also some junk years in there (0,1,20052009)
@@ -87,5 +90,96 @@ ggplot(small_train, aes(x = as.factor(max_floor), y = price_doc)) +
 
 
 
+# na counts per column
+raw_train %>% map(is.na) %>% map(sum) %>% flatten_dbl 
+
+nrow(raw_train)
+
+raw_train %>% group_by(timestamp) %>% 
+  summarise(count = n(),
+            avg_price = mean(price_doc, na.rm=TRUE)) %>% 
+  ggplot(aes(x = timestamp, y = avg_price)) + geom_line() +
+  geom_smooth()
+
+
+
+
+# commercial properties
+raw_train %>% filter(is.na(kitch_sq)) %>% map(is.na) %>% map(sum)  
+
+large <- raw_train %>% group_by(id) %>%  
+  inner_join(mutate_all(., funs(is.na)), by ='id') 
+
+
+
+large_macro <- macro %>% group_by(timestamp) %>%  
+  inner_join(mutate_all(., funs(is.na)), by ='timestamp') 
+
+
+
+full_data <- large %>% inner_join(large_macro, by = c('timestamp.x' = 'timestamp'))
+
+Mode <- function(x, na.rm = FALSE) {
+  if(na.rm){
+    x = x[!is.na(x)]
+  }
+  ux <- unique(x)
+  return(ux[which.max(tabulate(match(x, ux)))])
+}
+
+full_data[is.na(full_data)] <- 0
+
+target <- full_data$price_doc.x
+id <- full_data$id
+
+full_data$timestamp.x <- as.integer(full_data$timestamp.x)
+colnames(full_data) <- paste("start",colnames(full_data))
+colnames(full_data) <- gsub(" ", "", colnames(full_data))
+colnames(full_data) <- gsub("\\-", "_", colnames(full_data))
+colnames(full_data) <- gsub("\\+", "_", colnames(full_data))
+
+hashed <- hashed.model.matrix(startid+startprice_doc.x+startprice_doc.y + starttimestamp.x  ~ .-1,
+                              hash.size = 2^20, data = full_data)
+
+
+train_inds <- sample(1:nrow(full_data), floor(0.7*nrow(full_data)))
+
+sp_train <- hashed[train_inds,]
+sp_val <- hashed[-train_inds,]
+target_train <- target[train_inds]
+target_val <- target[-train_inds]
+
+
+
+dtrain <- xgb.DMatrix(sp_train, label = target_train)
+dval <- xgb.DMatrix(sp_val, label = target_val)
+
+
+paramz <- list(eta = 0.01,
+max_depth = 10,
+subsample = 0.7,
+colsample_bytree=0.7,
+gamma = 0.1,
+min_child_weight = 3
+)
+
+evalerror <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label")
+  err <- as.numeric(sum(labels != (preds > 0)))/length(labels)
+  return(list(metric = "error", value = err))
+}
+
+
+xgb.train(data=dtrain,
+          param=paramz,nrounds=5,nthread = 4,
+          objective = "reg:linear",
+          eval_metric = 'auc',
+          watchlist = list(eval =dval,model = dtrain))
+
+
+
+
+
+ 
 
 
